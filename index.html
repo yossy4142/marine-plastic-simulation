@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>海洋環境シミュレーション</title>
+    <style>
+        body { text-align: center; font-family: sans-serif; background-color: #f0f8ff; margin: 0; padding: 10px; }
+        #container { display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; }
+        .panel { background: white; padding: 15px; border: 1px solid #ccc; border-radius: 8px; text-align: left; width: 280px; margin-bottom: 10px; }
+        canvas { border: 2px solid #333; background-color: #e0f7fa; position: relative; }
+        
+        .legend { background: white; padding: 10px; border: 1px solid #ccc; border-radius: 8px; margin-top: 10px; display: flex; justify-content: space-around; font-size: 14px; font-weight: bold; }
+        
+        .score-board { background: #333; color: #fff; padding: 10px; border-radius: 8px; margin-bottom: 15px; }
+        .score-board h3 { margin: 0 0 5px 0; color: #4fc3f7; }
+        .score-board p { margin: 3px 0; font-size: 14px; }
+        .highlight-fish { color: #ffcc80; font-weight: bold; }
+        
+        .input-group { margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;}
+        .input-group input { width: 60px; text-align: right; }
+        
+        /* ボタンと予算表示のスタイルを画像に寄せて調整 */
+        button { width: 100%; padding: 12px; font-size: 16px; background-color: #5cb85c; color: white; border: none; border-radius: 5px; cursor: pointer; margin-top: 10px; font-weight: bold; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #budget_display { font-size: 16px; font-weight: bold; text-align: center; margin-top: 15px; padding: 10px; background: #eee; border-radius: 4px; }
+        .warn { color: red; }
+    </style>
+</head>
+<body>
+    <h2>海洋プラスチック回収シミュレーション</h2>
+    <div id="container">
+        <div>
+            <canvas id="simCanvas" width="400" height="400"></canvas>
+            <div class="legend">
+                <span>📡: スカウト</span>
+                <span>🤖: 回収機</span>
+                <span>🥤: ゴミ</span>
+                <span>🐟: 生物</span>
+                <span>⚡: 充電中</span>
+            </div>
+        </div>
+
+        <div>
+            <div class="panel">
+                <div class="score-board">
+                    <h3>総合スコア: <span id="disp_score">0</span> / 目標: <span id="disp_target">2000</span></h3>
+                    <p>残りターン: <span id="disp_step">120</span></p>
+                    <p class="highlight-fish">海洋生物 (現在 / 初期): <span id="disp_fish">10 / 10</span></p>
+                    <p>回収: <span id="disp_trash">0</span> | 衝突: <span id="disp_col">0</span></p>
+                    <p>電力: <span id="disp_ene">0</span> | ストレス: <span id="disp_stress">0.0</span></p>
+                </div>
+
+                <h4>機体・システム設定</h4>
+                <div class="input-group">制限ターン <input type="number" id="max_steps" value="120"></div>
+                <div class="input-group">目標スコア <input type="number" id="target_score" value="2000"></div>
+                <div class="input-group">バッテリー上限 <input type="number" id="max_battery" value="200"></div>
+                <div class="input-group">充電ターン数 <input type="number" id="charge_time" value="10"></div>
+                
+                <hr>
+                <h4>予算編成</h4>
+                <div class="input-group">予算上限 <input type="number" id="budget_total" value="2000" oninput="calculateBudget()"></div>
+                <div class="input-group">ｽｶｳﾄ単価 <input type="number" id="cost_scout" value="200" oninput="calculateBudget()"></div>
+                <div class="input-group">回収機単価 <input type="number" id="cost_collector" value="300" oninput="calculateBudget()"></div>
+                <div class="input-group">ｽｶｳﾄ導入数 <input type="number" id="num_scouts" value="4" min="0" oninput="calculateBudget()"></div>
+                <div class="input-group">回収機導入数 <input type="number" id="num_collectors" value="4" min="0" oninput="calculateBudget()"></div>
+                
+                <div id="budget_display">現在コスト: 2000 / 2000</div>
+                <button id="start_btn" onclick="startSimulation()">シミュレーション開始</button>
+            </div>
+
+            <div class="panel">
+                <h4>ロボットAI重み設定</h4>
+                <label>ゴミ引力: <span id="val_trash">1.0</span> <input type="range" id="w_trash" min="0" max="3" step="0.1" value="1.0" onchange="sendSettings()"></label><br>
+                <label>生物斥力: <span id="val_avoidfish">1.0</span> <input type="range" id="w_avoidfish" min="0" max="3" step="0.1" value="1.0" onchange="sendSettings()"></label><br>
+                <label>機体斥力: <span id="val_avoidrobot">1.0</span> <input type="range" id="w_avoidrobot" min="0" max="3" step="0.1" value="1.0" onchange="sendSettings()"></label>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const cellSize = 20;
+        let currentState = null;
+
+        const ws = new WebSocket("ws://localhost:8000/ws");
+
+        ws.onmessage = function(event) {
+            currentState = JSON.parse(event.data);
+            updateUI(currentState);
+            draw(currentState);
+        };
+
+        function calculateBudget() {
+            const total = parseInt(document.getElementById('budget_total').value) || 0;
+            const c_scout = parseInt(document.getElementById('cost_scout').value) || 0;
+            const c_col = parseInt(document.getElementById('cost_collector').value) || 0;
+            const n_scout = parseInt(document.getElementById('num_scouts').value) || 0;
+            const n_col = parseInt(document.getElementById('num_collectors').value) || 0;
+            
+            const currentCost = (c_scout * n_scout) + (c_col * n_col);
+            const display = document.getElementById('budget_display');
+            display.innerText = `現在コスト: ${currentCost} / ${total}`;
+            
+            if (currentCost > total) {
+                display.className = "warn";
+                document.getElementById('start_btn').disabled = true;
+                document.getElementById('start_btn').innerText = "予算超過";
+            } else {
+                display.className = "";
+                document.getElementById('start_btn').disabled = false;
+                document.getElementById('start_btn').innerText = "シミュレーション開始";
+            }
+        }
+
+        function updateUI(state) {
+            document.getElementById('disp_score').innerText = state.stats.score;
+            document.getElementById('disp_target').innerText = state.target_score;
+            document.getElementById('disp_step').innerText = Math.max(0, state.max_steps - state.step);
+            
+            const currentFishes = state.fishes ? state.fishes.length : 10;
+            document.getElementById('disp_fish').innerText = `${currentFishes} / 10`;
+
+            document.getElementById('disp_trash').innerText = state.stats.n_trash;
+            document.getElementById('disp_col').innerText = state.stats.n_collision;
+            document.getElementById('disp_ene').innerText = state.stats.energy;
+            document.getElementById('disp_stress').innerText = state.stats.total_stress.toFixed(1);
+        }
+
+        function draw(state) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.strokeStyle = "#b2ebf2";
+            for(let i=0; i<=state.grid_width; i++) {
+                ctx.beginPath(); ctx.moveTo(i * cellSize, 0); ctx.lineTo(i * cellSize, state.grid_height * cellSize); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(0, i * cellSize); ctx.lineTo(state.grid_width * cellSize, i * cellSize); ctx.stroke();
+            }
+
+            state.fishes.forEach(f => {
+                const stressRatio = Math.min(f.stress / 10.0, 1.0);
+                const r = Math.floor(255 * stressRatio);
+                const g = Math.floor(200 * (1 - stressRatio));
+                
+                ctx.fillStyle = `rgba(${r}, ${g}, 0, 0.5)`;
+                ctx.beginPath(); 
+                ctx.arc(f.x * cellSize + cellSize/2, f.y * cellSize + cellSize/2, cellSize/2.2, 0, Math.PI * 2); 
+                ctx.fill();
+            });
+
+            ctx.fillStyle = "#000000";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.font = "18px sans-serif";
+
+            state.fishes.forEach(f => {
+                ctx.fillText("🐟", f.x * cellSize + cellSize/2, f.y * cellSize + cellSize/2);
+            });
+
+            state.trash.forEach(t => {
+                ctx.fillText("🥤", t.x * cellSize + cellSize/2, t.y * cellSize + cellSize/2);
+            });
+
+            state.robots.forEach(r => {
+                const icon = (r.type === "scout") ? "📡" : "🤖";
+                ctx.fillText(icon, r.x * cellSize + cellSize/2, r.y * cellSize + cellSize/2);
+                
+                if (r.is_charging) {
+                    ctx.font = "12px sans-serif";
+                    ctx.fillText("⚡", r.x * cellSize + cellSize/2 + 8, r.y * cellSize + cellSize/2 - 8);
+                    ctx.font = "18px sans-serif";
+                }
+            });
+
+            if (state.status === "finished") {
+                ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.font = "bold 40px sans-serif";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                if (state.stats.score >= state.target_score) {
+                    ctx.fillStyle = "#4CAF50";
+                    ctx.fillText("STAGE CLEAR!", canvas.width/2, canvas.height/2);
+                } else {
+                    ctx.fillStyle = "#F44336";
+                    ctx.fillText("GAME OVER...", canvas.width/2, canvas.height/2);
+                }
+            }
+        }
+
+        function startSimulation() {
+            // JavaScript側でもデフォルト値を画面に合わせる
+            const num_scouts = parseInt(document.getElementById('num_scouts').value) || 4;
+            const num_collectors = parseInt(document.getElementById('num_collectors').value) || 4;
+            const max_steps = parseInt(document.getElementById('max_steps').value) || 120;
+            const target_score = parseInt(document.getElementById('target_score').value) || 2000;
+            const max_battery = parseInt(document.getElementById('max_battery').value) || 200;
+            const charge_time = parseInt(document.getElementById('charge_time').value) || 10;
+
+            fetch('/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ num_scouts, num_collectors, max_steps, target_score, max_battery, charge_time })
+            });
+        }
+
+        function sendSettings() {
+            const w_trash = document.getElementById('w_trash').value;
+            const w_avoidfish = document.getElementById('w_avoidfish').value;
+            const w_avoidrobot = document.getElementById('w_avoidrobot').value;
+            
+            document.getElementById('val_trash').innerText = w_trash;
+            document.getElementById('val_avoidfish').innerText = w_avoidfish;
+            document.getElementById('val_avoidrobot').innerText = w_avoidrobot;
+
+            fetch('/update_settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    w_trash: parseFloat(w_trash),
+                    w_avoidfish: parseFloat(w_avoidfish),
+                    w_avoidrobot: parseFloat(w_avoidrobot)
+                })
+            });
+        }
+    </script>
+</body>
+</html>
